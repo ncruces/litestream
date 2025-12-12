@@ -5,8 +5,9 @@ import (
 	"encoding/hex"
 	"testing"
 
+	_ "github.com/ncruces/go-sqlite3/driver"
+	_ "github.com/ncruces/go-sqlite3/embed"
 	"github.com/superfly/ltx"
-	_ "modernc.org/sqlite"
 
 	"github.com/benbjohnson/litestream"
 )

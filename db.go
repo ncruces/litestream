@@ -18,10 +18,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ncruces/go-sqlite3"
+	"github.com/ncruces/go-sqlite3/driver"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/superfly/ltx"
-	"modernc.org/sqlite"
 
 	"github.com/benbjohnson/litestream/internal"
 )
@@ -354,17 +355,12 @@ func (db *DB) setPersistWAL(ctx context.Context) error {
 	}
 	defer conn.Close()
 
-	return conn.Raw(func(driverConn interface{}) error {
-		fc, ok := driverConn.(sqlite.FileControl)
-		if !ok {
-			return fmt.Errorf("driver does not implement FileControl")
-		}
-
-		_, err := fc.FileControlPersistWAL("main", 1)
+	return conn.Raw(func(driverConn any) error {
+		conn := driverConn.(driver.Conn).Raw()
+		_, err := conn.FileControl("main", sqlite3.FCNTL_PERSIST_WAL, true)
 		if err != nil {
-			return fmt.Errorf("FileControlPersistWAL: %w", err)
+			return fmt.Errorf("FCNTL_PERSIST_WAL: %w", err)
 		}
-
 		return nil
 	})
 }
@@ -395,7 +391,7 @@ func (db *DB) init(ctx context.Context) (err error) {
 	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(%d)",
 		db.path, db.BusyTimeout.Milliseconds())
 
-	if db.db, err = sql.Open("sqlite", dsn); err != nil {
+	if db.db, err = sql.Open("sqlite3", dsn); err != nil {
 		return err
 	}
 
