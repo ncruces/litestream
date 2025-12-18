@@ -404,6 +404,26 @@ func TestNewReplicaClientFromURL(t *testing.T) {
 		}
 	})
 
+	t.Run("S3_ARN_WithQueryParams", func(t *testing.T) {
+		client, err := litestream.NewReplicaClientFromURL("s3://arn:aws:s3:us-east-1:123456789012:accesspoint/db-access/backups?sign-payload=false")
+		if err != nil {
+			t.Fatal(err)
+		}
+		s3Client, ok := client.(*s3.ReplicaClient)
+		if !ok {
+			t.Fatalf("expected *s3.ReplicaClient, got %T", client)
+		}
+		if s3Client.Bucket != "arn:aws:s3:us-east-1:123456789012:accesspoint/db-access" {
+			t.Errorf("expected bucket ARN, got %q", s3Client.Bucket)
+		}
+		if s3Client.Path != "backups" {
+			t.Errorf("expected path 'backups', got %q", s3Client.Path)
+		}
+		if s3Client.SignPayload != false {
+			t.Errorf("expected SignPayload=false from query param, got %v", s3Client.SignPayload)
+		}
+	})
+
 	t.Run("S3_MissingBucket", func(t *testing.T) {
 		_, err := litestream.NewReplicaClientFromURL("s3:///path")
 		if err == nil {
@@ -562,6 +582,10 @@ func TestIsTigrisEndpoint(t *testing.T) {
 		{"FLY.STORAGE.TIGRIS.DEV", true},
 		{"https://fly.storage.tigris.dev", true},
 		{"http://fly.storage.tigris.dev", true},
+		{"t3.storage.dev", true},
+		{"T3.STORAGE.DEV", true},
+		{"https://t3.storage.dev", true},
+		{"http://t3.storage.dev", true},
 		{"s3.amazonaws.com", false},
 		{"localhost:9000", false},
 		{"", false},
@@ -626,6 +650,247 @@ func TestCleanReplicaURLPath(t *testing.T) {
 			got := litestream.CleanReplicaURLPath(tt.path)
 			if got != tt.expected {
 				t.Errorf("CleanReplicaURLPath(%q) = %q, want %q", tt.path, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestParseS3AccessPointURL(t *testing.T) {
+	tests := []struct {
+		name       string
+		url        string
+		wantScheme string
+		wantHost   string
+		wantPath   string
+		wantQuery  map[string]string
+		wantErr    bool
+	}{
+		{
+			name:       "BasicARN",
+			url:        "s3://arn:aws:s3:us-east-1:123456789012:accesspoint/my-access-point",
+			wantScheme: "s3",
+			wantHost:   "arn:aws:s3:us-east-1:123456789012:accesspoint/my-access-point",
+			wantPath:   "",
+			wantQuery:  nil,
+		},
+		{
+			name:       "ARNWithPath",
+			url:        "s3://arn:aws:s3:us-east-1:123456789012:accesspoint/my-access-point/backups/db",
+			wantScheme: "s3",
+			wantHost:   "arn:aws:s3:us-east-1:123456789012:accesspoint/my-access-point",
+			wantPath:   "backups/db",
+			wantQuery:  nil,
+		},
+		{
+			name:       "ARNWithSingleQueryParam",
+			url:        "s3://arn:aws:s3:us-east-1:123456789012:accesspoint/my-access-point?sign-payload=true",
+			wantScheme: "s3",
+			wantHost:   "arn:aws:s3:us-east-1:123456789012:accesspoint/my-access-point",
+			wantPath:   "",
+			wantQuery:  map[string]string{"sign-payload": "true"},
+		},
+		{
+			name:       "ARNWithMultipleQueryParams",
+			url:        "s3://arn:aws:s3:us-east-1:123456789012:accesspoint/my-access-point?sign-payload=false&region=us-west-2",
+			wantScheme: "s3",
+			wantHost:   "arn:aws:s3:us-east-1:123456789012:accesspoint/my-access-point",
+			wantPath:   "",
+			wantQuery:  map[string]string{"sign-payload": "false", "region": "us-west-2"},
+		},
+		{
+			name:       "ARNWithPathAndQuery",
+			url:        "s3://arn:aws:s3:us-east-1:123456789012:accesspoint/my-access-point/backups?sign-payload=true",
+			wantScheme: "s3",
+			wantHost:   "arn:aws:s3:us-east-1:123456789012:accesspoint/my-access-point",
+			wantPath:   "backups",
+			wantQuery:  map[string]string{"sign-payload": "true"},
+		},
+		{
+			name:       "CaseInsensitiveScheme",
+			url:        "S3://arn:aws:s3:us-east-1:123456789012:accesspoint/my-access-point",
+			wantScheme: "s3",
+			wantHost:   "arn:aws:s3:us-east-1:123456789012:accesspoint/my-access-point",
+			wantPath:   "",
+			wantQuery:  nil,
+		},
+		{
+			name:       "EmptyQueryValue",
+			url:        "s3://arn:aws:s3:us-east-1:123456789012:accesspoint/my-access-point?key=",
+			wantScheme: "s3",
+			wantHost:   "arn:aws:s3:us-east-1:123456789012:accesspoint/my-access-point",
+			wantPath:   "",
+			wantQuery:  map[string]string{"key": ""},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme, host, path, query, _, err := litestream.ParseReplicaURLWithQuery(tt.url)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if scheme != tt.wantScheme {
+				t.Errorf("scheme = %q, want %q", scheme, tt.wantScheme)
+			}
+			if host != tt.wantHost {
+				t.Errorf("host = %q, want %q", host, tt.wantHost)
+			}
+			if path != tt.wantPath {
+				t.Errorf("path = %q, want %q", path, tt.wantPath)
+			}
+
+			if tt.wantQuery == nil {
+				if len(query) > 0 {
+					t.Errorf("query = %v, want nil/empty", query)
+				}
+			} else {
+				for key, wantVal := range tt.wantQuery {
+					if gotVal := query.Get(key); gotVal != wantVal {
+						t.Errorf("query[%q] = %q, want %q", key, gotVal, wantVal)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestIsDigitalOceanEndpoint(t *testing.T) {
+	tests := []struct {
+		endpoint string
+		expected bool
+	}{
+		{"https://sfo3.digitaloceanspaces.com", true},
+		{"https://nyc3.digitaloceanspaces.com", true},
+		{"sfo3.digitaloceanspaces.com", true},
+		{"https://s3.amazonaws.com", false},
+		{"https://s3.filebase.com", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.endpoint, func(t *testing.T) {
+			got := litestream.IsDigitalOceanEndpoint(tt.endpoint)
+			if got != tt.expected {
+				t.Errorf("IsDigitalOceanEndpoint(%q) = %v, want %v", tt.endpoint, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestIsBackblazeEndpoint(t *testing.T) {
+	tests := []struct {
+		endpoint string
+		expected bool
+	}{
+		{"https://s3.us-west-002.backblazeb2.com", true},
+		{"https://s3.eu-central-003.backblazeb2.com", true},
+		{"s3.us-west-002.backblazeb2.com", true},
+		{"https://s3.amazonaws.com", false},
+		{"https://s3.filebase.com", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.endpoint, func(t *testing.T) {
+			got := litestream.IsBackblazeEndpoint(tt.endpoint)
+			if got != tt.expected {
+				t.Errorf("IsBackblazeEndpoint(%q) = %v, want %v", tt.endpoint, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestIsFilebaseEndpoint(t *testing.T) {
+	tests := []struct {
+		endpoint string
+		expected bool
+	}{
+		{"https://s3.filebase.com", true},
+		{"http://s3.filebase.com", true},
+		{"s3.filebase.com", true},
+		{"https://s3.amazonaws.com", false},
+		{"https://sfo3.digitaloceanspaces.com", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.endpoint, func(t *testing.T) {
+			got := litestream.IsFilebaseEndpoint(tt.endpoint)
+			if got != tt.expected {
+				t.Errorf("IsFilebaseEndpoint(%q) = %v, want %v", tt.endpoint, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestIsScalewayEndpoint(t *testing.T) {
+	tests := []struct {
+		endpoint string
+		expected bool
+	}{
+		{"https://s3.fr-par.scw.cloud", true},
+		{"https://s3.nl-ams.scw.cloud", true},
+		{"s3.fr-par.scw.cloud", true},
+		{"https://s3.amazonaws.com", false},
+		{"https://s3.filebase.com", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.endpoint, func(t *testing.T) {
+			got := litestream.IsScalewayEndpoint(tt.endpoint)
+			if got != tt.expected {
+				t.Errorf("IsScalewayEndpoint(%q) = %v, want %v", tt.endpoint, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestIsCloudflareR2Endpoint(t *testing.T) {
+	tests := []struct {
+		endpoint string
+		expected bool
+	}{
+		{"https://abcdef123456.r2.cloudflarestorage.com", true},
+		{"https://account-id.r2.cloudflarestorage.com", true},
+		{"abcdef123456.r2.cloudflarestorage.com", true},
+		{"https://s3.amazonaws.com", false},
+		{"https://s3.filebase.com", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.endpoint, func(t *testing.T) {
+			got := litestream.IsCloudflareR2Endpoint(tt.endpoint)
+			if got != tt.expected {
+				t.Errorf("IsCloudflareR2Endpoint(%q) = %v, want %v", tt.endpoint, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestIsMinIOEndpoint(t *testing.T) {
+	tests := []struct {
+		endpoint string
+		expected bool
+	}{
+		{"http://localhost:9000", true},
+		{"http://192.168.1.100:9000", true},
+		{"minio.local:9000", true},
+		{"https://s3.amazonaws.com", false},
+		{"https://s3.filebase.com", false},
+		{"https://sfo3.digitaloceanspaces.com", false},
+		{"s3.filebase.com", false}, // No port, not MinIO
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.endpoint, func(t *testing.T) {
+			got := litestream.IsMinIOEndpoint(tt.endpoint)
+			if got != tt.expected {
+				t.Errorf("IsMinIOEndpoint(%q) = %v, want %v", tt.endpoint, got, tt.expected)
 			}
 		})
 	}

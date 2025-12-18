@@ -80,6 +80,7 @@ type ReplicaClient struct {
 	SkipVerify        bool
 	SignPayload       bool
 	RequireContentMD5 bool
+	IsTigris          bool
 
 	// Upload configuration
 	PartSize    int64 // Part size for multipart uploads (default: 5MB)
@@ -91,6 +92,7 @@ func NewReplicaClient() *ReplicaClient {
 	return &ReplicaClient{
 		logger:            slog.Default().WithGroup(ReplicaClientType),
 		RequireContentMD5: true,
+		SignPayload:       true,
 	}
 }
 
@@ -154,8 +156,17 @@ func NewReplicaClientFromURL(scheme, host, urlPath string, query url.Values, use
 		return nil, fmt.Errorf("bucket required for s3 replica URL")
 	}
 
-	// Check for Tigris endpoint
+	// Detect S3-compatible provider endpoints for applying appropriate defaults.
 	isTigris := litestream.IsTigrisEndpoint(endpoint)
+	isDigitalOcean := litestream.IsDigitalOceanEndpoint(endpoint)
+	isBackblaze := litestream.IsBackblazeEndpoint(endpoint)
+	isFilebase := litestream.IsFilebaseEndpoint(endpoint)
+	isScaleway := litestream.IsScalewayEndpoint(endpoint)
+	isCloudflareR2 := litestream.IsCloudflareR2Endpoint(endpoint)
+	isMinIO := litestream.IsMinIOEndpoint(endpoint)
+
+	// Track if forcePathStyle was explicitly set via query parameter.
+	forcePathStyleSet := query.Get("forcePathStyle") != ""
 
 	// Read authentication from environment variables
 	if v := os.Getenv("AWS_ACCESS_KEY_ID"); v != "" {
@@ -169,16 +180,10 @@ func NewReplicaClientFromURL(scheme, host, urlPath string, query url.Values, use
 		client.SecretAccessKey = v
 	}
 
-	// Configure client
-	client.Bucket = bucket
-	client.Path = urlPath
-	client.Region = region
-	client.Endpoint = endpoint
-	client.ForcePathStyle = forcePathStyle
-	client.SkipVerify = skipVerify
-
-	// Apply Tigris defaults
+	// Apply provider-specific defaults for S3-compatible providers.
 	if isTigris {
+		// Tigris: requires signed payloads, no MD5
+		client.IsTigris = true
 		if !signPayloadSet {
 			signPayload, signPayloadSet = true, true
 		}
@@ -186,6 +191,26 @@ func NewReplicaClientFromURL(scheme, host, urlPath string, query url.Values, use
 			requireMD5, requireMD5Set = false, true
 		}
 	}
+	if isDigitalOcean || isBackblaze || isFilebase || isScaleway || isCloudflareR2 || isMinIO {
+		// All these providers require signed payloads (don't support UNSIGNED-PAYLOAD)
+		if !signPayloadSet {
+			signPayload, signPayloadSet = true, true
+		}
+	}
+	if !forcePathStyleSet {
+		// Filebase, Backblaze B2, and MinIO require path-style URLs
+		if isFilebase || isBackblaze || isMinIO {
+			forcePathStyle = true
+		}
+	}
+
+	// Configure client
+	client.Bucket = bucket
+	client.Path = urlPath
+	client.Region = region
+	client.Endpoint = endpoint
+	client.ForcePathStyle = forcePathStyle
+	client.SkipVerify = skipVerify
 
 	if signPayloadSet {
 		client.SignPayload = signPayload
@@ -292,6 +317,14 @@ func (c *ReplicaClient) Init(ctx context.Context) (err error) {
 			// Add User-Agent and optional middleware.
 			o.APIOptions = append(o.APIOptions, c.middlewareOption())
 		},
+	}
+
+	// Tigris doesn't support aws-chunked content encoding used by default
+	// checksum calculation in AWS SDK Go v2 v1.73.0+. Disable it for Tigris.
+	if c.IsTigris {
+		s3Opts = append(s3Opts, func(o *s3.Options) {
+			o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
+		})
 	}
 
 	// Add custom endpoint if specified
@@ -539,6 +572,25 @@ func (c *ReplicaClient) middlewareOption() func(*middleware.Stack) error {
 			return err
 		}
 
+		if c.IsTigris {
+			if err := stack.Build.Add(
+				middleware.BuildMiddlewareFunc(
+					"LitestreamTigrisConsistent",
+					func(ctx context.Context, in middleware.BuildInput, next middleware.BuildHandler) (
+						out middleware.BuildOutput, metadata middleware.Metadata, err error,
+					) {
+						if req, ok := in.Request.(*smithyhttp.Request); ok {
+							req.Header.Set("X-Tigris-Consistent", "true")
+						}
+						return next.HandleBuild(ctx, in)
+					},
+				),
+				middleware.After,
+			); err != nil {
+				return err
+			}
+		}
+
 		// Many S3-compatible providers (e.g. Filebase) do not support SigV4
 		// payload hashing. Switching to unsigned payload matches the behavior
 		// of the AWS SDK v1 client used in Litestream v0.3.x and restores
@@ -552,6 +604,17 @@ func (c *ReplicaClient) middlewareOption() func(*middleware.Stack) error {
 			if err := v4.AddContentSHA256HeaderMiddleware(stack); err != nil {
 				return err
 			}
+		}
+
+		// Disable AWS SDK v2's trailing checksum middleware which uses
+		// aws-chunked encoding. This is required for:
+		// 1. UNSIGNED-PAYLOAD requests (aws-chunked + UNSIGNED-PAYLOAD is rejected by AWS)
+		// 2. S3-compatible providers (Filebase, MinIO, Backblaze B2, etc.) that don't
+		//    support aws-chunked encoding at all
+		// See: https://github.com/aws/aws-sdk-go-v2/discussions/2960
+		// See: https://github.com/benbjohnson/litestream/issues/895
+		if !c.SignPayload || c.Endpoint != "" {
+			stack.Finalize.Remove("addInputChecksumTrailer")
 		}
 
 		if !c.RequireContentMD5 {

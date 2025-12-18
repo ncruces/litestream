@@ -139,7 +139,11 @@ func (s *Store) Open(ctx context.Context) error {
 }
 
 func (s *Store) Close(ctx context.Context) (err error) {
-	for _, db := range s.dbs {
+	s.mu.Lock()
+	dbs := slices.Clone(s.dbs)
+	s.mu.Unlock()
+
+	for _, db := range dbs {
 		if e := db.Close(ctx); e != nil && err == nil {
 			err = e
 		}
@@ -156,6 +160,85 @@ func (s *Store) DBs() []*DB {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return slices.Clone(s.dbs)
+}
+
+// AddDB registers a new database with the store and starts monitoring it.
+func (s *Store) AddDB(db *DB) error {
+	if db == nil {
+		return fmt.Errorf("db required")
+	}
+
+	// First check: see if database already exists
+	s.mu.Lock()
+	for _, existing := range s.dbs {
+		if existing.Path() == db.Path() {
+			s.mu.Unlock()
+			return nil
+		}
+	}
+	s.mu.Unlock()
+
+	// Apply store-wide retention settings before opening the database.
+	db.L0Retention = s.L0Retention
+
+	// Open the database without holding the lock to avoid blocking other operations.
+	// The double-check pattern below handles the race condition.
+	if err := db.Open(); err != nil {
+		return fmt.Errorf("open db: %w", err)
+	}
+
+	// Second check: verify database wasn't added by another goroutine while we were opening.
+	// If it was, close our instance and return without error.
+	s.mu.Lock()
+
+	for _, existing := range s.dbs {
+		if existing.Path() == db.Path() {
+			// Another goroutine added this database while we were opening.
+			// Release lock before closing to avoid potential deadlock.
+			s.mu.Unlock()
+			if err := db.Close(context.Background()); err != nil {
+				slog.Error("close duplicate db", "path", db.Path(), "error", err)
+			}
+			return nil
+		}
+	}
+
+	s.dbs = append(s.dbs, db)
+	s.mu.Unlock()
+	return nil
+}
+
+// RemoveDB stops monitoring the database at the provided path and closes it.
+func (s *Store) RemoveDB(ctx context.Context, path string) error {
+	if path == "" {
+		return fmt.Errorf("db path required")
+	}
+
+	s.mu.Lock()
+
+	idx := -1
+	var db *DB
+	for i, existing := range s.dbs {
+		if existing.Path() == path {
+			idx = i
+			db = existing
+			break
+		}
+	}
+
+	if db == nil {
+		s.mu.Unlock()
+		return nil
+	}
+
+	s.dbs = slices.Delete(s.dbs, idx, idx+1)
+	s.mu.Unlock()
+
+	if err := db.Close(ctx); err != nil {
+		return fmt.Errorf("close db: %w", err)
+	}
+
+	return nil
 }
 
 // SetL0Retention updates the retention window for L0 files and propagates it to
@@ -180,52 +263,61 @@ func (s *Store) SnapshotLevel() *CompactionLevel {
 func (s *Store) monitorCompactionLevel(ctx context.Context, lvl *CompactionLevel) {
 	slog.Info("starting compaction monitor", "level", lvl.Level, "interval", lvl.Interval)
 
-	// Start first compaction immediately to check for any missed compactions from shutdown
+	retryDeadline := time.Time{}
 	timer := time.NewTimer(time.Nanosecond)
+	defer timer.Stop()
 
-LOOP:
 	for {
 		select {
 		case <-ctx.Done():
-			timer.Stop()
-			break LOOP
-
+			return
 		case <-timer.C:
-			// Reset timer before we start compactions so we don't delay it
-			// from long compactions.
-			timer = time.NewTimer(time.Until(lvl.NextCompactionAt(time.Now())))
+			// proceed
+		}
 
-			for _, db := range s.DBs() {
-				// First attempt to compact the database.
-				if _, err := s.CompactDB(ctx, db, lvl); errors.Is(err, ErrNoCompaction) {
-					slog.Debug("no compaction", "level", lvl.Level, "path", db.Path())
-					continue
-				} else if errors.Is(err, ErrCompactionTooEarly) {
-					slog.Debug("recently compacted, skipping", "level", lvl.Level, "path", db.Path())
-					continue
-				} else if errors.Is(err, ErrDBNotReady) {
-					slog.Debug("db not ready, skipping", "level", lvl.Level, "path", db.Path())
-					continue
-				} else if err != nil {
-					// Don't log or sleep on context cancellation errors during shutdown
-					if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-						slog.Error("compaction failed", "level", lvl.Level, "error", err)
-						time.Sleep(1 * time.Second) // wait so we don't rack up S3 charges
-					}
-				}
+		now := time.Now()
+		nextDelay := time.Until(lvl.NextCompactionAt(now))
 
-				// Each time we snapshot, clean up everything before the oldest snapshot.
-				if lvl.Level == SnapshotLevel {
-					if err := s.EnforceSnapshotRetention(ctx, db); err != nil {
-						// Don't log or sleep on context cancellation errors during shutdown
-						if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-							slog.Error("retention enforcement failed", "error", err)
-							time.Sleep(1 * time.Second) // wait so we don't rack up S3 charges
-						}
-					}
+		var anyNotReady bool
+
+		for _, db := range s.DBs() {
+			_, err := s.CompactDB(ctx, db, lvl)
+			switch {
+			case errors.Is(err, ErrNoCompaction), errors.Is(err, ErrCompactionTooEarly):
+				slog.Debug("no compaction", "level", lvl.Level, "path", db.Path())
+			case errors.Is(err, ErrDBNotReady):
+				slog.Debug("db not ready, skipping", "level", lvl.Level, "path", db.Path())
+				anyNotReady = true
+			case err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded):
+				slog.Error("compaction failed", "level", lvl.Level, "error", err)
+			}
+
+			if lvl.Level == SnapshotLevel {
+				if err := s.EnforceSnapshotRetention(ctx, db); err != nil &&
+					!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+					slog.Error("retention enforcement failed", "error", err)
 				}
 			}
 		}
+
+		timedOut := !retryDeadline.IsZero() && now.After(retryDeadline)
+		if anyNotReady && !timedOut {
+			if retryDeadline.IsZero() {
+				retryDeadline = now.Add(30 * time.Second)
+			}
+			nextDelay = time.Second
+			slog.Debug("scheduling retry for unready dbs", "level", lvl.Level)
+		} else {
+			if timedOut {
+				slog.Warn("timeout waiting for db initialization", "level", lvl.Level)
+			}
+			retryDeadline = time.Time{}
+		}
+
+		if nextDelay < 0 {
+			nextDelay = 0
+		}
+		timer.Reset(nextDelay)
 	}
 }
 

@@ -67,7 +67,8 @@ func ReplicaTypeFromURL(rawURL string) string {
 // ParseReplicaURL parses a replica URL and returns the scheme, host, and path.
 func ParseReplicaURL(s string) (scheme, host, urlPath string, err error) {
 	if strings.HasPrefix(strings.ToLower(s), "s3://arn:") {
-		return parseS3AccessPointURL(s)
+		scheme, host, urlPath, _, err = parseS3AccessPointURL(s)
+		return scheme, host, urlPath, err
 	}
 
 	scheme, host, urlPath, _, _, err = ParseReplicaURLWithQuery(s)
@@ -78,8 +79,8 @@ func ParseReplicaURL(s string) (scheme, host, urlPath string, err error) {
 func ParseReplicaURLWithQuery(s string) (scheme, host, urlPath string, query url.Values, userinfo *url.Userinfo, err error) {
 	// Handle S3 Access Point ARNs which can't be parsed by standard url.Parse
 	if strings.HasPrefix(strings.ToLower(s), "s3://arn:") {
-		scheme, host, urlPath, err := parseS3AccessPointURL(s)
-		return scheme, host, urlPath, nil, nil, err
+		scheme, host, urlPath, query, err := parseS3AccessPointURL(s)
+		return scheme, host, urlPath, query, nil, err
 	}
 
 	u, err := url.Parse(s)
@@ -103,19 +104,35 @@ func ParseReplicaURLWithQuery(s string) (scheme, host, urlPath string, query url
 }
 
 // parseS3AccessPointURL parses an S3 Access Point URL (s3://arn:...).
-func parseS3AccessPointURL(s string) (scheme, host, urlPath string, err error) {
+func parseS3AccessPointURL(s string) (scheme, host, urlPath string, query url.Values, err error) {
 	const prefix = "s3://"
 	if !strings.HasPrefix(strings.ToLower(s), prefix) {
-		return "", "", "", fmt.Errorf("invalid s3 access point url: %s", s)
+		return "", "", "", nil, fmt.Errorf("invalid s3 access point url: %s", s)
 	}
 
 	arnWithPath := s[len(prefix):]
-	bucket, key, err := splitS3AccessPointARN(arnWithPath)
-	if err != nil {
-		return "", "", "", err
+
+	// Split off query string if present
+	var queryStr string
+	if idx := strings.IndexByte(arnWithPath, '?'); idx != -1 {
+		queryStr = arnWithPath[idx+1:]
+		arnWithPath = arnWithPath[:idx]
 	}
 
-	return "s3", bucket, CleanReplicaURLPath(key), nil
+	bucket, key, err := splitS3AccessPointARN(arnWithPath)
+	if err != nil {
+		return "", "", "", nil, err
+	}
+
+	// Parse query string if present
+	if queryStr != "" {
+		query, err = url.ParseQuery(queryStr)
+		if err != nil {
+			return "", "", "", nil, fmt.Errorf("parse query string: %w", err)
+		}
+	}
+
+	return "s3", bucket, CleanReplicaURLPath(key), query, nil
 }
 
 // splitS3AccessPointARN splits an S3 Access Point ARN into bucket and key components.
@@ -189,16 +206,94 @@ func BoolQueryValue(query url.Values, keys ...string) (value bool, ok bool) {
 
 // IsTigrisEndpoint returns true if the endpoint is the Tigris object storage service.
 func IsTigrisEndpoint(endpoint string) bool {
+	host := extractEndpointHost(endpoint)
+	return host == "fly.storage.tigris.dev" || host == "t3.storage.dev"
+}
+
+// IsDigitalOceanEndpoint returns true if the endpoint is Digital Ocean Spaces.
+func IsDigitalOceanEndpoint(endpoint string) bool {
+	host := extractEndpointHost(endpoint)
+	if host == "" {
+		return false
+	}
+	return strings.HasSuffix(host, ".digitaloceanspaces.com")
+}
+
+// IsBackblazeEndpoint returns true if the endpoint is Backblaze B2.
+func IsBackblazeEndpoint(endpoint string) bool {
+	host := extractEndpointHost(endpoint)
+	if host == "" {
+		return false
+	}
+	return strings.HasSuffix(host, ".backblazeb2.com")
+}
+
+// IsFilebaseEndpoint returns true if the endpoint is Filebase.
+func IsFilebaseEndpoint(endpoint string) bool {
+	host := extractEndpointHost(endpoint)
+	if host == "" {
+		return false
+	}
+	return host == "s3.filebase.com"
+}
+
+// IsScalewayEndpoint returns true if the endpoint is Scaleway Object Storage.
+func IsScalewayEndpoint(endpoint string) bool {
+	host := extractEndpointHost(endpoint)
+	if host == "" {
+		return false
+	}
+	return strings.HasSuffix(host, ".scw.cloud")
+}
+
+// IsCloudflareR2Endpoint returns true if the endpoint is Cloudflare R2.
+func IsCloudflareR2Endpoint(endpoint string) bool {
+	host := extractEndpointHost(endpoint)
+	if host == "" {
+		return false
+	}
+	return strings.HasSuffix(host, ".r2.cloudflarestorage.com")
+}
+
+// IsMinIOEndpoint returns true if the endpoint appears to be MinIO or similar
+// (a custom endpoint with a port number that is not a known cloud provider).
+func IsMinIOEndpoint(endpoint string) bool {
+	host := extractEndpointHost(endpoint)
+	if host == "" {
+		return false
+	}
+	// MinIO typically uses host:port format without .com domain
+	// Check for port number in the host
+	if !strings.Contains(host, ":") {
+		return false
+	}
+	// Exclude known cloud providers
+	if strings.Contains(host, ".amazonaws.com") ||
+		strings.Contains(host, ".digitaloceanspaces.com") ||
+		strings.Contains(host, ".backblazeb2.com") ||
+		strings.Contains(host, ".filebase.com") ||
+		strings.Contains(host, ".scw.cloud") ||
+		strings.Contains(host, ".r2.cloudflarestorage.com") ||
+		strings.Contains(host, "tigris.dev") ||
+		strings.Contains(host, "t3.storage.dev") {
+		return false
+	}
+	return true
+}
+
+// extractEndpointHost extracts the host from an endpoint URL or returns the
+// endpoint as-is if it's not a full URL.
+func extractEndpointHost(endpoint string) string {
 	endpoint = strings.TrimSpace(strings.ToLower(endpoint))
 	if endpoint == "" {
-		return false
+		return ""
 	}
 	if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
 		if u, err := url.Parse(endpoint); err == nil && u.Host != "" {
-			endpoint = u.Host
+			return u.Host
 		}
 	}
-	return endpoint == "fly.storage.tigris.dev"
+	return endpoint
 }
 
 // IsURL returns true if s appears to be a URL (has a scheme).
