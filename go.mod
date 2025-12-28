@@ -18,13 +18,14 @@ require (
 	github.com/aws/smithy-go v1.22.5
 	github.com/fsouza/fake-gcs-server v1.47.3
 	github.com/nats-io/nats.go v1.44.0
-	github.com/ncruces/go-sqlite3 v0.30.3
+	github.com/ncruces/go-sqlite3 v0.30.4
+	github.com/ncruces/wbt v0.2.0
 	github.com/pkg/sftp v1.13.6
 	github.com/prometheus/client_golang v1.17.0
 	github.com/stretchr/testify v1.10.0
 	github.com/studio-b12/gowebdav v0.11.0
 	github.com/superfly/ltx v0.5.1
-	golang.org/x/crypto v0.45.0
+	golang.org/x/crypto v0.46.0
 	google.golang.org/api v0.154.0
 )
 
@@ -80,7 +81,7 @@ require (
 	github.com/prometheus/common v0.44.0 // indirect
 	github.com/prometheus/procfs v0.11.1 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
-	github.com/tetratelabs/wazero v1.10.1 // indirect
+	github.com/tetratelabs/wazero v1.11.0 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.46.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.46.1 // indirect
@@ -89,9 +90,9 @@ require (
 	go.opentelemetry.io/otel/trace v1.21.0 // indirect
 	golang.org/x/net v0.47.0 // indirect
 	golang.org/x/oauth2 v0.15.0 // indirect
-	golang.org/x/sync v0.18.0 // indirect
-	golang.org/x/sys v0.38.0 // indirect
-	golang.org/x/text v0.31.0 // indirect
+	golang.org/x/sync v0.19.0 // indirect
+	golang.org/x/sys v0.39.0 // indirect
+	golang.org/x/text v0.32.0 // indirect
 	golang.org/x/time v0.5.0 // indirect
 	golang.org/x/xerrors v0.0.0-20220907171357-04be3eba64a2 // indirect
 	google.golang.org/appengine v1.6.7 // indirect
