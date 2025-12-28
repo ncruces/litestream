@@ -21,6 +21,7 @@ require (
 	github.com/ncruces/go-sqlite3 v0.30.3
 	github.com/pkg/sftp v1.13.6
 	github.com/prometheus/client_golang v1.17.0
+	github.com/stretchr/testify v1.10.0
 	github.com/studio-b12/gowebdav v0.11.0
 	github.com/superfly/ltx v0.5.1
 	golang.org/x/crypto v0.45.0
@@ -74,6 +75,7 @@ require (
 	github.com/pierrec/lz4/v4 v4.1.22 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/pkg/xattr v0.4.9 // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/prometheus/client_model v0.4.1-0.20230718164431-9a2bf3000d16 // indirect
 	github.com/prometheus/common v0.44.0 // indirect
 	github.com/prometheus/procfs v0.11.1 // indirect
@@ -98,4 +100,5 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20231127180814-3a041ad873d4 // indirect
 	google.golang.org/grpc v1.59.0 // indirect
 	google.golang.org/protobuf v1.31.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

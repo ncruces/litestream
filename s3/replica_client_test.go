@@ -90,7 +90,10 @@ func TestIsNotExists(t *testing.T) {
 func TestReplicaClient_DefaultSignPayload(t *testing.T) {
 	client := NewReplicaClient()
 	if !client.SignPayload {
-		t.Error("expected default SignPayload to be true")
+		t.Error("expected default SignPayload to be true for AWS S3 compatibility")
+	}
+	if !client.RequireContentMD5 {
+		t.Error("expected default RequireContentMD5 to be true for AWS S3 compatibility")
 	}
 }
 
@@ -1014,67 +1017,117 @@ func TestParseHost(t *testing.T) {
 	}
 }
 
+func TestReplicaClient_AccessPointARN(t *testing.T) {
+	t.Run("ARNAsBucketName", func(t *testing.T) {
+		arn := "arn:aws:s3:us-east-2:123456789012:accesspoint/my-access-point"
+
+		c := NewReplicaClient()
+		c.Bucket = arn
+		c.Region = "us-east-2"
+		c.AccessKeyID = "test-access-key"
+		c.SecretAccessKey = "test-secret-key"
+
+		if c.Bucket != arn {
+			t.Errorf("expected bucket to be ARN, got %s", c.Bucket)
+		}
+		if c.Region != "us-east-2" {
+			t.Errorf("expected region to be us-east-2, got %s", c.Region)
+		}
+	})
+
+	t.Run("ARNWithPath", func(t *testing.T) {
+		arn := "arn:aws:s3:us-west-2:111122223333:accesspoint/prod-access-point"
+
+		c := NewReplicaClient()
+		c.Bucket = arn
+		c.Path = "my-db/replica"
+		c.Region = "us-west-2"
+
+		if c.Bucket != arn {
+			t.Errorf("expected bucket to be ARN, got %s", c.Bucket)
+		}
+		if c.Path != "my-db/replica" {
+			t.Errorf("expected path to be my-db/replica, got %s", c.Path)
+		}
+	})
+
+	t.Run("ARNRejectsPathStyle", func(t *testing.T) {
+		arn := "arn:aws:s3:us-east-1:123456789012:accesspoint/test-ap"
+
+		c := NewReplicaClient()
+		c.Bucket = arn
+		c.Path = "replica"
+		c.Region = "us-east-1"
+		c.Endpoint = "http://localhost:9000"
+		c.ForcePathStyle = true
+		c.AccessKeyID = "test-access-key"
+		c.SecretAccessKey = "test-secret-key"
+
+		ctx := context.Background()
+		if err := c.Init(ctx); err != nil {
+			t.Fatalf("Init() with ARN bucket should not fail: %v", err)
+		}
+
+		data := mustLTX(t)
+		_, err := c.WriteLTXFile(ctx, 0, 2, 2, bytes.NewReader(data))
+		if err == nil {
+			t.Fatal("expected error when using path-style with ARN bucket")
+		}
+		if !strings.Contains(err.Error(), "Path-style addressing cannot be used with ARN") {
+			t.Errorf("expected path-style ARN error, got: %v", err)
+		}
+	})
+}
+
 func TestReplicaClient_TigrisConsistentHeader(t *testing.T) {
+	// Test that non-Tigris endpoints do NOT send the X-Tigris-Consistent header.
+	// The Tigris case (header sent) requires an actual Tigris endpoint and is
+	// covered by Tigris integration tests.
 	data := mustLTX(t)
 
-	tests := []struct {
-		name       string
-		isTigris   bool
-		wantHeader string
-	}{
-		{name: "TigrisEnabled", isTigris: true, wantHeader: "true"},
-		{name: "TigrisDisabled", isTigris: false, wantHeader: ""},
+	headers := make(chan http.Header, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		_, _ = io.Copy(io.Discard, r.Body)
+
+		if r.Method == http.MethodPut {
+			select {
+			case headers <- r.Header.Clone():
+			default:
+			}
+			w.Header().Set("ETag", `"test-etag"`)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := NewReplicaClient()
+	client.Bucket = "test-bucket"
+	client.Path = "replica"
+	client.Region = "us-east-1"
+	client.Endpoint = server.URL // Non-Tigris endpoint
+	client.ForcePathStyle = true
+	client.AccessKeyID = "test-access-key"
+	client.SecretAccessKey = "test-secret-key"
+
+	ctx := context.Background()
+	if err := client.Init(ctx); err != nil {
+		t.Fatalf("Init() error: %v", err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			headers := make(chan http.Header, 1)
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				defer r.Body.Close()
-				_, _ = io.Copy(io.Discard, r.Body)
+	if _, err := client.WriteLTXFile(ctx, 0, 2, 2, bytes.NewReader(data)); err != nil {
+		t.Fatalf("WriteLTXFile() error: %v", err)
+	}
 
-				if r.Method == http.MethodPut {
-					select {
-					case headers <- r.Header.Clone():
-					default:
-					}
-					w.Header().Set("ETag", `"test-etag"`)
-					w.WriteHeader(http.StatusOK)
-					return
-				}
-
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer server.Close()
-
-			client := NewReplicaClient()
-			client.Bucket = "test-bucket"
-			client.Path = "replica"
-			client.Region = "us-east-1"
-			client.Endpoint = server.URL
-			client.ForcePathStyle = true
-			client.AccessKeyID = "test-access-key"
-			client.SecretAccessKey = "test-secret-key"
-			client.IsTigris = tt.isTigris
-
-			ctx := context.Background()
-			if err := client.Init(ctx); err != nil {
-				t.Fatalf("Init() error: %v", err)
-			}
-
-			if _, err := client.WriteLTXFile(ctx, 0, 2, 2, bytes.NewReader(data)); err != nil {
-				t.Fatalf("WriteLTXFile() error: %v", err)
-			}
-
-			select {
-			case hdr := <-headers:
-				got := hdr.Get("X-Tigris-Consistent")
-				if got != tt.wantHeader {
-					t.Fatalf("X-Tigris-Consistent header = %q, want %q", got, tt.wantHeader)
-				}
-			case <-time.After(time.Second):
-				t.Fatal("timeout waiting for PUT request")
-			}
-		})
+	select {
+	case hdr := <-headers:
+		if got := hdr.Get("X-Tigris-Consistent"); got != "" {
+			t.Fatalf("X-Tigris-Consistent header = %q, want empty (non-Tigris endpoint)", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for PUT request")
 	}
 }

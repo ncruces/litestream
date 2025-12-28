@@ -65,6 +65,14 @@ var (
 	tigrisSecretAccessKey = flag.String("tigris-secret-access-key", os.Getenv("LITESTREAM_TIGRIS_SECRET_ACCESS_KEY"), "")
 )
 
+// Cloudflare R2 settings (S3-compatible)
+var (
+	r2AccessKeyID     = flag.String("r2-access-key-id", os.Getenv("LITESTREAM_R2_ACCESS_KEY_ID"), "")
+	r2SecretAccessKey = flag.String("r2-secret-access-key", os.Getenv("LITESTREAM_R2_SECRET_ACCESS_KEY"), "")
+	r2Endpoint        = flag.String("r2-endpoint", os.Getenv("LITESTREAM_R2_ENDPOINT"), "")
+	r2Bucket          = flag.String("r2-bucket", os.Getenv("LITESTREAM_R2_BUCKET"), "")
+)
+
 // Google cloud storage settings
 var (
 	gsBucket = flag.String("gs-bucket", os.Getenv("LITESTREAM_GS_BUCKET"), "")
@@ -191,9 +199,7 @@ func MustOpenSQLDB(tb testing.TB, path string) *sql.DB {
 	d, err := sql.Open("sqlite3", path)
 	if err != nil {
 		tb.Fatal(err)
-	} else if _, err := d.ExecContext(context.Background(), `PRAGMA journal_mode = wal;`); err != nil {
-		tb.Fatal(err)
-	} else if _, err := d.ExecContext(context.Background(), `PRAGMA busy_timeout = 5000;`); err != nil {
+	} else if _, err := d.ExecContext(tb.Context(), `PRAGMA journal_mode = wal;`); err != nil {
 		tb.Fatal(err)
 	}
 	return d
@@ -230,6 +236,8 @@ func NewReplicaClient(tb testing.TB, typ string) litestream.ReplicaClient {
 		return NewOSSReplicaClient(tb)
 	case "tigris":
 		return NewTigrisReplicaClient(tb)
+	case "r2":
+		return NewR2ReplicaClient(tb)
 	default:
 		tb.Fatalf("invalid replica client type: %q", typ)
 		return nil
@@ -255,7 +263,6 @@ func NewS3ReplicaClient(tb testing.TB) *s3.ReplicaClient {
 	c.Endpoint = *s3Endpoint
 	c.ForcePathStyle = *s3ForcePathStyle
 	c.SkipVerify = *s3SkipVerify
-	c.SignPayload = true
 	return c
 }
 
@@ -275,9 +282,34 @@ func NewTigrisReplicaClient(tb testing.TB) *s3.ReplicaClient {
 	c.Path = path.Join(defaultTigrisPathRoot, fmt.Sprintf("%016x", rand.Uint64()))
 	c.Endpoint = defaultTigrisEndpoint
 	c.ForcePathStyle = true
-	c.SignPayload = true
 	c.RequireContentMD5 = false
-	c.IsTigris = true
+	return c
+}
+
+// NewR2ReplicaClient returns an S3 client configured for Cloudflare R2.
+// Skips the test if R2 credentials are not configured.
+func NewR2ReplicaClient(tb testing.TB) *s3.ReplicaClient {
+	tb.Helper()
+
+	if *r2AccessKeyID == "" || *r2SecretAccessKey == "" {
+		tb.Skip("r2 credentials not configured (set LITESTREAM_R2_ACCESS_KEY_ID/SECRET_ACCESS_KEY)")
+	}
+	if *r2Endpoint == "" {
+		tb.Skip("r2 endpoint not configured (set LITESTREAM_R2_ENDPOINT)")
+	}
+	if *r2Bucket == "" {
+		tb.Skip("r2 bucket not configured (set LITESTREAM_R2_BUCKET)")
+	}
+
+	c := s3.NewReplicaClient()
+	c.AccessKeyID = *r2AccessKeyID
+	c.SecretAccessKey = *r2SecretAccessKey
+	c.Region = "auto"
+	c.Bucket = *r2Bucket
+	c.Path = path.Join("integration-tests", fmt.Sprintf("%016x", rand.Uint64()))
+	c.Endpoint = *r2Endpoint
+	c.ForcePathStyle = true
+	c.SignPayload = true
 	return c
 }
 

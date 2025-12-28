@@ -2,7 +2,6 @@ package litestream
 
 import (
 	"context"
-	"database/sql"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -11,7 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	_ "github.com/ncruces/go-sqlite3/driver"
+	"github.com/ncruces/go-sqlite3/driver"
 	_ "github.com/ncruces/go-sqlite3/embed"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/superfly/ltx"
@@ -182,7 +181,7 @@ func TestDB_Sync_UpdatesMetrics(t *testing.T) {
 	}()
 
 	// Open SQL connection
-	sqldb, err := sql.Open("sqlite3", dbPath)
+	sqldb, err := driver.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +274,7 @@ func TestDB_Checkpoint_UpdatesMetrics(t *testing.T) {
 		}
 	}()
 
-	sqldb, err := sql.Open("sqlite3", dbPath)
+	sqldb, err := driver.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,7 +342,7 @@ func TestDB_Sync_ErrorMetrics(t *testing.T) {
 		_ = db.Close(context.Background())
 	}()
 
-	sqldb, err := sql.Open("sqlite3", dbPath)
+	sqldb, err := driver.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,7 +411,7 @@ func TestDB_Verify_WALOffsetAtHeader(t *testing.T) {
 		}
 	}()
 
-	sqldb, err := sql.Open("sqlite3", dbPath)
+	sqldb, err := driver.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -531,7 +530,7 @@ func TestDB_Verify_WALOffsetAtHeader_SaltMismatch(t *testing.T) {
 		}
 	}()
 
-	sqldb, err := sql.Open("sqlite3", dbPath)
+	sqldb, err := driver.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}

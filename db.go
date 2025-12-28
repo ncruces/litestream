@@ -352,25 +352,6 @@ func (db *DB) Close(ctx context.Context) (err error) {
 	return err
 }
 
-// setPersistWAL sets the PERSIST_WAL file control on the database connection.
-// This prevents SQLite from removing the WAL file when connections close.
-func (db *DB) setPersistWAL(ctx context.Context) error {
-	conn, err := db.db.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("get connection: %w", err)
-	}
-	defer conn.Close()
-
-	return conn.Raw(func(driverConn any) error {
-		conn := driverConn.(driver.Conn).Raw()
-		_, err := conn.FileControl("main", sqlite3.FCNTL_PERSIST_WAL, true)
-		if err != nil {
-			return fmt.Errorf("FCNTL_PERSIST_WAL: %w", err)
-		}
-		return nil
-	})
-}
-
 // init initializes the connection to the database.
 // Skipped if already initialized or if the database file does not exist.
 func (db *DB) init(ctx context.Context) (err error) {
@@ -394,16 +375,21 @@ func (db *DB) init(ctx context.Context) (err error) {
 	}
 	db.dirInfo = fi
 
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(%d)",
+	dsn := fmt.Sprintf("file:%s?"+
+		"_pragma=busy_timeout(%d)&"+
+		"_pragma=journal_mode(wal)&"+
+		"_pragma=wal_autocheckpoint(0)",
 		db.path, db.BusyTimeout.Milliseconds())
 
-	if db.db, err = sql.Open("sqlite3", dsn); err != nil {
+	if db.db, err = driver.Open(dsn, func(conn *sqlite3.Conn) error {
+		// Set PERSIST_WAL to prevent WAL file removal when database connections close.
+		_, err := conn.FileControl("", sqlite3.FCNTL_PERSIST_WAL, true)
+		if err != nil {
+			return fmt.Errorf("FCNTL_PERSIST_WAL: %w", err)
+		}
+		return nil
+	}); err != nil {
 		return err
-	}
-
-	// Set PERSIST_WAL to prevent WAL file removal when database connections close.
-	if err := db.setPersistWAL(ctx); err != nil {
-		return fmt.Errorf("set PERSIST_WAL: %w", err)
 	}
 
 	// Open long-running database file descriptor. Required for non-OFD locks.
@@ -425,15 +411,10 @@ func (db *DB) init(ctx context.Context) (err error) {
 	// Enable WAL and ensure it is set. New mode should be returned on success:
 	// https://www.sqlite.org/pragma.html#pragma_journal_mode
 	var mode string
-	if err := db.db.QueryRowContext(ctx, `PRAGMA journal_mode = wal;`).Scan(&mode); err != nil {
+	if err := db.db.QueryRowContext(ctx, `PRAGMA journal_mode;`).Scan(&mode); err != nil {
 		return err
 	} else if mode != "wal" {
 		return fmt.Errorf("enable wal failed, mode=%q", mode)
-	}
-
-	// Disable autocheckpoint for litestream's connection.
-	if _, err := db.db.ExecContext(ctx, `PRAGMA wal_autocheckpoint = 0;`); err != nil {
-		return fmt.Errorf("disable autocheckpoint: %w", err)
 	}
 
 	// Create a table to force writes to the WAL when empty.
