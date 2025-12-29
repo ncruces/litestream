@@ -17,8 +17,8 @@ import (
 	"github.com/superfly/ltx"
 	"google.golang.org/api/iterator"
 
-	"github.com/benbjohnson/litestream"
-	"github.com/benbjohnson/litestream/internal"
+	"github.com/ncruces/litestream"
+	"github.com/ncruces/litestream/internal"
 )
 
 func init() {

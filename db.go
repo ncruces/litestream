@@ -18,13 +18,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ncruces/go-sqlite3"
-	"github.com/ncruces/go-sqlite3/driver"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/superfly/ltx"
 
-	"github.com/benbjohnson/litestream/internal"
+	"github.com/ncruces/go-sqlite3"
+	"github.com/ncruces/go-sqlite3/driver"
+	"github.com/ncruces/litestream/internal"
 )
 
 // Default DB settings.

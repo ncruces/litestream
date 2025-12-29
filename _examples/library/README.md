@@ -10,9 +10,10 @@ versions. The CLI interface is more stable for production use. Use the library
 API at your own risk, and pin to specific versions.
 
 If you open the same database with two different SQLite driver implementations
-in the same process and close one of them, you can hit locking issues. Prefer
-using the same driver for your app and Litestream (these examples use
-`github.com/ncruces/go-sqlite3`).
+in the same process and close one of them, you can hit locking issues.
+
+This fork is meant to be used with the
+[`ncruces/go-sqlite3`](https://github.com/ncruces/go-sqlite3) driver.
 
 ## Examples
 
@@ -61,10 +62,10 @@ This example:
 import (
     "context"
     "database/sql"
-    "github.com/benbjohnson/litestream"
-    "github.com/benbjohnson/litestream/file"  // or s3, gs, abs, etc.
-    "github.com/ncruces/go-sqlite3/driver"
-    _ "github.com/ncruces/go-sqlite3/embed"
+	"github.com/ncruces/go-sqlite3/driver"
+	_ "github.com/ncruces/go-sqlite3/embed"
+	"github.com/ncruces/litestream"
+    "github.com/ncruces/litestream/file"  // or s3, gs, abs, etc.
 )
 
 // 1. Create database wrapper

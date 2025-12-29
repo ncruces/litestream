@@ -10,10 +10,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ncruces/go-sqlite3/driver"
-	_ "github.com/ncruces/go-sqlite3/embed"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/superfly/ltx"
+
+	"github.com/ncruces/go-sqlite3/driver"
+	_ "github.com/ncruces/go-sqlite3/embed"
 )
 
 // testReplicaClient is a minimal mock for testing that doesn't cause import cycles.

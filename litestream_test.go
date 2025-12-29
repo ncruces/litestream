@@ -5,11 +5,11 @@ import (
 	"encoding/hex"
 	"testing"
 
-	_ "github.com/ncruces/go-sqlite3/driver"
-	_ "github.com/ncruces/go-sqlite3/embed"
 	"github.com/superfly/ltx"
 
-	"github.com/benbjohnson/litestream"
+	_ "github.com/ncruces/go-sqlite3/driver"
+	_ "github.com/ncruces/go-sqlite3/embed"
+	"github.com/ncruces/litestream"
 )
 
 func TestChecksum(t *testing.T) {

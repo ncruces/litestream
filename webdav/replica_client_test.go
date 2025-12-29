@@ -15,7 +15,7 @@ import (
 
 	"github.com/superfly/ltx"
 
-	"github.com/benbjohnson/litestream/webdav"
+	"github.com/ncruces/litestream/webdav"
 )
 
 func TestReplicaClient_Type(t *testing.T) {

@@ -13,9 +13,9 @@ import (
 
 	"github.com/superfly/ltx"
 
-	"github.com/benbjohnson/litestream"
-	"github.com/benbjohnson/litestream/file"
-	"github.com/benbjohnson/litestream/internal/testingutil"
+	"github.com/ncruces/litestream"
+	"github.com/ncruces/litestream/file"
+	"github.com/ncruces/litestream/internal/testingutil"
 )
 
 func TestDB_Path(t *testing.T) {

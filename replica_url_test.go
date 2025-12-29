@@ -3,15 +3,15 @@ package litestream_test
 import (
 	"testing"
 
-	"github.com/benbjohnson/litestream"
-	"github.com/benbjohnson/litestream/abs"
-	"github.com/benbjohnson/litestream/file"
-	"github.com/benbjohnson/litestream/gs"
-	"github.com/benbjohnson/litestream/nats"
-	"github.com/benbjohnson/litestream/oss"
-	"github.com/benbjohnson/litestream/s3"
-	"github.com/benbjohnson/litestream/sftp"
-	"github.com/benbjohnson/litestream/webdav"
+	"github.com/ncruces/litestream"
+	"github.com/ncruces/litestream/abs"
+	"github.com/ncruces/litestream/file"
+	"github.com/ncruces/litestream/gs"
+	"github.com/ncruces/litestream/nats"
+	"github.com/ncruces/litestream/oss"
+	"github.com/ncruces/litestream/s3"
+	"github.com/ncruces/litestream/sftp"
+	"github.com/ncruces/litestream/webdav"
 )
 
 func TestNewReplicaClientFromURL(t *testing.T) {

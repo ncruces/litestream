@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benbjohnson/litestream"
-	"github.com/benbjohnson/litestream/file"
 	"github.com/ncruces/go-sqlite3/driver"
 	_ "github.com/ncruces/go-sqlite3/embed"
+	"github.com/ncruces/litestream"
+	"github.com/ncruces/litestream/file"
 )
 
 func TestNewVFS(t *testing.T) {

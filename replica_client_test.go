@@ -16,9 +16,9 @@ import (
 	"github.com/superfly/ltx"
 	"golang.org/x/crypto/ssh"
 
-	"github.com/benbjohnson/litestream"
-	"github.com/benbjohnson/litestream/internal/testingutil"
-	"github.com/benbjohnson/litestream/s3"
+	"github.com/ncruces/litestream"
+	"github.com/ncruces/litestream/internal/testingutil"
+	"github.com/ncruces/litestream/s3"
 )
 
 // createLTXData creates a minimal valid LTX file with a header for testing.

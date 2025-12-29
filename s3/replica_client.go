@@ -34,8 +34,8 @@ import (
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/superfly/ltx"
 
-	"github.com/benbjohnson/litestream"
-	"github.com/benbjohnson/litestream/internal"
+	"github.com/ncruces/litestream"
+	"github.com/ncruces/litestream/internal"
 )
 
 func init() {
@@ -322,7 +322,7 @@ func (c *ReplicaClient) Init(ctx context.Context) (err error) {
 	// support aws-chunked content encoding used by default checksum calculation
 	// in AWS SDK Go v2 v1.73.0+. Disable automatic checksum calculation for all
 	// custom endpoints.
-	// See: https://github.com/benbjohnson/litestream/issues/918
+	// See: https://github.com/ncruces/litestream/issues/918
 	if c.Endpoint != "" {
 		s3Opts = append(s3Opts, func(o *s3.Options) {
 			o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
@@ -614,7 +614,7 @@ func (c *ReplicaClient) middlewareOption() func(*middleware.Stack) error {
 		// 2. S3-compatible providers (Filebase, MinIO, Backblaze B2, etc.) that don't
 		//    support aws-chunked encoding at all
 		// See: https://github.com/aws/aws-sdk-go-v2/discussions/2960
-		// See: https://github.com/benbjohnson/litestream/issues/895
+		// See: https://github.com/ncruces/litestream/issues/895
 		if !c.SignPayload || c.Endpoint != "" {
 			stack.Finalize.Remove("addInputChecksumTrailer")
 		}

@@ -14,9 +14,8 @@ import (
 
 	"github.com/ncruces/go-sqlite3/driver"
 	_ "github.com/ncruces/go-sqlite3/embed"
-
-	"github.com/benbjohnson/litestream"
-	"github.com/benbjohnson/litestream/s3"
+	"github.com/ncruces/litestream"
+	"github.com/ncruces/litestream/s3"
 )
 
 func main() {

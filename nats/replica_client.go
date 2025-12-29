@@ -19,8 +19,8 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/superfly/ltx"
 
-	"github.com/benbjohnson/litestream"
-	"github.com/benbjohnson/litestream/internal"
+	"github.com/ncruces/litestream"
+	"github.com/ncruces/litestream/internal"
 )
 
 func init() {

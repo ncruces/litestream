@@ -19,8 +19,8 @@ import (
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/credentials"
 	"github.com/superfly/ltx"
 
-	"github.com/benbjohnson/litestream"
-	"github.com/benbjohnson/litestream/internal"
+	"github.com/ncruces/litestream"
+	"github.com/ncruces/litestream/internal"
 )
 
 func init() {

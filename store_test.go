@@ -10,9 +10,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/benbjohnson/litestream"
-	"github.com/benbjohnson/litestream/file"
-	"github.com/benbjohnson/litestream/internal/testingutil"
+	"github.com/ncruces/litestream"
+	"github.com/ncruces/litestream/file"
+	"github.com/ncruces/litestream/internal/testingutil"
 )
 
 func TestStore_CompactDB(t *testing.T) {

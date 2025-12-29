@@ -13,10 +13,10 @@ import (
 
 	"github.com/superfly/ltx"
 
-	"github.com/benbjohnson/litestream"
-	"github.com/benbjohnson/litestream/file"
-	"github.com/benbjohnson/litestream/internal/testingutil"
-	"github.com/benbjohnson/litestream/mock"
+	"github.com/ncruces/litestream"
+	"github.com/ncruces/litestream/file"
+	"github.com/ncruces/litestream/internal/testingutil"
+	"github.com/ncruces/litestream/mock"
 )
 
 func TestReplica_Sync(t *testing.T) {

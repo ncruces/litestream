@@ -13,7 +13,7 @@ import (
 
 	"github.com/superfly/ltx"
 
-	"github.com/benbjohnson/litestream/internal"
+	"github.com/ncruces/litestream/internal"
 )
 
 // Default replica settings.
