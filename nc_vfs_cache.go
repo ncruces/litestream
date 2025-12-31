@@ -52,17 +52,19 @@ func (c *pageCache) getOrFetch(ctx context.Context, client ReplicaClient, pgno u
 }
 
 // +checklocks:c.mtx
-func (c *pageCache) evict(pageSize int) {
+func (c *pageCache) evict(pgsz int) {
 	// Evict random keys until we're under the maximum size.
 	// SQLite has its own page cache, which it will use for each connection.
 	// Since this is a second layer of shared cache,
 	// random eviction is probably good enough.
-	if pageSize*len(c.pages) < c.size {
+	if len(c.pages)*pgsz < c.size {
 		return
 	}
-	for key := range c.pages {
-		delete(c.pages, key)
-		if pageSize*len(c.pages) < c.size {
+	for pgno := range c.pages {
+		if pgno > 1 { // Don't evit page 1.
+			delete(c.pages, pgno)
+		}
+		if len(c.pages)*pgsz < c.size {
 			return
 		}
 	}
