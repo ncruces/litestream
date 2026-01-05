@@ -18,6 +18,8 @@ import (
 	sftpserver "github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 
+	_ "github.com/ncruces/go-sqlite3/driver"
+	_ "github.com/ncruces/go-sqlite3/embed"
 	"github.com/ncruces/litestream"
 	"github.com/ncruces/litestream/abs"
 	"github.com/ncruces/litestream/file"
@@ -173,7 +175,8 @@ func MustOpenDB(tb testing.TB) *litestream.DB {
 func MustOpenDBAt(tb testing.TB, path string) *litestream.DB {
 	tb.Helper()
 	db := NewDB(tb, path)
-	db.MonitorInterval = 0 // disable background goroutine
+	db.MonitorInterval = 0     // disable background goroutine
+	db.ShutdownSyncTimeout = 0 // disable shutdown sync retry for faster tests
 	db.Replica = litestream.NewReplica(db)
 	db.Replica.Client = NewFileReplicaClient(tb)
 	db.Replica.MonitorEnabled = false // disable background goroutine

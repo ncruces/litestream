@@ -29,11 +29,13 @@ import (
 
 // Default DB settings.
 const (
-	DefaultMonitorInterval    = 1 * time.Second
-	DefaultCheckpointInterval = 1 * time.Minute
-	DefaultBusyTimeout        = 1 * time.Second
-	DefaultMinCheckpointPageN = 1000
-	DefaultTruncatePageN      = 121359 // ~500MB with 4KB page size
+	DefaultMonitorInterval      = 1 * time.Second
+	DefaultCheckpointInterval   = 1 * time.Minute
+	DefaultBusyTimeout          = 1 * time.Second
+	DefaultMinCheckpointPageN   = 1000
+	DefaultTruncatePageN        = 121359 // ~500MB with 4KB page size
+	DefaultShutdownSyncTimeout  = 30 * time.Second
+	DefaultShutdownSyncInterval = 500 * time.Millisecond
 )
 
 // DB represents a managed instance of a SQLite database in the file system.
@@ -137,6 +139,12 @@ type DB struct {
 	// Must be set before calling Open().
 	Replica *Replica
 
+	// Shutdown sync retry settings.
+	// ShutdownSyncTimeout is the total time to retry syncing on shutdown.
+	// ShutdownSyncInterval is the time between retry attempts.
+	ShutdownSyncTimeout  time.Duration
+	ShutdownSyncInterval time.Duration
+
 	// Where to send log messages, defaults to global slog with database epath.
 	Logger *slog.Logger
 }
@@ -150,13 +158,15 @@ func NewDB(path string) *DB {
 		metaPath: filepath.Join(dir, "."+file+MetaDirSuffix),
 		notify:   make(chan struct{}),
 
-		MinCheckpointPageN: DefaultMinCheckpointPageN,
-		TruncatePageN:      DefaultTruncatePageN,
-		CheckpointInterval: DefaultCheckpointInterval,
-		MonitorInterval:    DefaultMonitorInterval,
-		BusyTimeout:        DefaultBusyTimeout,
-		L0Retention:        DefaultL0Retention,
-		Logger:             slog.With("db", filepath.Base(path)),
+		MinCheckpointPageN:   DefaultMinCheckpointPageN,
+		TruncatePageN:        DefaultTruncatePageN,
+		CheckpointInterval:   DefaultCheckpointInterval,
+		MonitorInterval:      DefaultMonitorInterval,
+		BusyTimeout:          DefaultBusyTimeout,
+		L0Retention:          DefaultL0Retention,
+		ShutdownSyncTimeout:  DefaultShutdownSyncTimeout,
+		ShutdownSyncInterval: DefaultShutdownSyncInterval,
+		Logger:               slog.With("db", filepath.Base(path)),
 	}
 	db.maxLTXFileInfos.m = make(map[int]*ltx.FileInfo)
 
@@ -323,7 +333,7 @@ func (db *DB) Close(ctx context.Context) (err error) {
 	// Ensure replicas perform a final sync and stop replicating.
 	if db.Replica != nil {
 		if db.db != nil {
-			if e := db.Replica.Sync(ctx); e != nil && err == nil {
+			if e := db.syncReplicaWithRetry(ctx); e != nil && err == nil {
 				err = e
 			}
 		}
@@ -350,6 +360,77 @@ func (db *DB) Close(ctx context.Context) (err error) {
 	}
 
 	return err
+}
+
+// syncReplicaWithRetry attempts to sync the replica with retry logic for shutdown.
+// It retries until success, timeout, or context cancellation.
+// If ShutdownSyncTimeout is 0, it performs a single sync attempt without retries.
+func (db *DB) syncReplicaWithRetry(ctx context.Context) error {
+	if db.Replica == nil {
+		return nil
+	}
+
+	timeout := db.ShutdownSyncTimeout
+	interval := db.ShutdownSyncInterval
+
+	// If timeout is zero, just try once (no retry)
+	if timeout == 0 {
+		return db.Replica.Sync(ctx)
+	}
+
+	// Use default interval if not set
+	if interval == 0 {
+		interval = DefaultShutdownSyncInterval
+	}
+
+	// Create deadline context for total retry duration
+	deadlineCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	var lastErr error
+	attempt := 0
+	startTime := time.Now()
+
+	for {
+		attempt++
+
+		// Try sync
+		if err := db.Replica.Sync(deadlineCtx); err == nil {
+			if attempt > 1 {
+				db.Logger.Info("shutdown sync succeeded after retry",
+					"attempts", attempt,
+					"duration", time.Since(startTime))
+			}
+			return nil
+		} else {
+			lastErr = err
+		}
+
+		// Check if we should stop retrying
+		select {
+		case <-deadlineCtx.Done():
+			db.Logger.Error("shutdown sync failed after timeout",
+				"attempts", attempt,
+				"duration", time.Since(startTime),
+				"lastError", lastErr)
+			return fmt.Errorf("shutdown sync timeout after %d attempts: %w", attempt, lastErr)
+		default:
+		}
+
+		// Log retry
+		db.Logger.Warn("shutdown sync failed, retrying",
+			"attempt", attempt,
+			"error", lastErr,
+			"elapsed", time.Since(startTime),
+			"remaining", time.Until(startTime.Add(timeout)))
+
+		// Wait before retry
+		select {
+		case <-time.After(interval):
+		case <-deadlineCtx.Done():
+			return fmt.Errorf("shutdown sync timeout after %d attempts: %w", attempt, lastErr)
+		}
+	}
 }
 
 // init initializes the connection to the database.
@@ -548,7 +629,10 @@ func (db *DB) releaseReadLock() error {
 	}
 
 	// Rollback & clear read transaction.
-	err := db.rtx.Rollback()
+	// Use rollback() helper to suppress "already rolled back" errors that can
+	// occur during shutdown when concurrent checkpoint and close operations
+	// both attempt to release the read lock. See issue #934.
+	err := rollback(db.rtx)
 	db.rtx = nil
 	return err
 }
@@ -1353,7 +1437,9 @@ func (db *DB) checkpoint(ctx context.Context, mode string) error {
 	}
 
 	// Release write lock before exiting.
-	if err := tx.Rollback(); err != nil {
+	// Use rollback() helper for consistency with releaseReadLock() and the
+	// defer above. See issue #934.
+	if err := rollback(tx); err != nil {
 		return fmt.Errorf("rollback post-checkpoint tx: %w", err)
 	}
 

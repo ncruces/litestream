@@ -33,6 +33,8 @@ import (
 	smithytime "github.com/aws/smithy-go/time"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/superfly/ltx"
+	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/semaphore"
 
 	"github.com/ncruces/litestream"
 	"github.com/ncruces/litestream/internal"
@@ -53,6 +55,11 @@ const MaxKeys = 1000
 
 // DefaultRegion is the region used if one is not specified.
 const DefaultRegion = "us-east-1"
+
+// DefaultMetadataConcurrency is the default number of concurrent HeadObject calls
+// for fetching accurate timestamps during timestamp-based restore.
+// S3 can handle 5,500+ HEAD requests per second per prefix.
+const DefaultMetadataConcurrency = 50
 
 // contentMD5StackKey is used to pass the precomputed Content-MD5 checksum
 // through the middleware stack from Serialize to Finalize phase.
@@ -84,6 +91,21 @@ type ReplicaClient struct {
 	// Upload configuration
 	PartSize    int64 // Part size for multipart uploads (default: 5MB)
 	Concurrency int   // Number of concurrent parts to upload (default: 5)
+
+	// MetadataConcurrency controls parallel HeadObject calls for timestamp-based restore.
+	// Higher values improve restore speed for large backup histories.
+	// Default: 50 (S3 can handle 5,500+ HEAD/s per prefix)
+	MetadataConcurrency int
+
+	// Server-Side Encryption - Customer Provided Keys (SSE-C)
+	// Works with all S3-compatible providers (AWS, MinIO, Exoscale, etc.)
+	SSECustomerAlgorithm string // Must be "AES256" if set
+	SSECustomerKey       string // Base64-encoded 256-bit (32 byte) encryption key
+	SSECustomerKeyMD5    string // Base64-encoded MD5 of key (auto-computed if not set)
+
+	// Server-Side Encryption - AWS KMS (SSE-KMS)
+	// Only works with AWS S3 (not S3-compatible providers)
+	SSEKMSKeyID string // KMS key ID, ARN, or alias
 }
 
 // NewReplicaClient returns a new instance of ReplicaClient.
@@ -217,6 +239,30 @@ func NewReplicaClientFromURL(scheme, host, urlPath string, query url.Values, use
 		client.RequireContentMD5 = requireMD5
 	}
 
+	// Parse SSE-C parameters from query string
+	if v := query.Get("sseCustomerAlgorithm"); v != "" {
+		client.SSECustomerAlgorithm = v
+	} else if v := query.Get("sse-customer-algorithm"); v != "" {
+		client.SSECustomerAlgorithm = v
+	}
+	if v := query.Get("sseCustomerKey"); v != "" {
+		client.SSECustomerKey = v
+	} else if v := query.Get("sse-customer-key"); v != "" {
+		client.SSECustomerKey = v
+	}
+	if v := query.Get("sseCustomerKeyMD5"); v != "" {
+		client.SSECustomerKeyMD5 = v
+	} else if v := query.Get("sse-customer-key-md5"); v != "" {
+		client.SSECustomerKeyMD5 = v
+	}
+
+	// Parse SSE-KMS parameters from query string
+	if v := query.Get("sseKmsKeyId"); v != "" {
+		client.SSEKMSKeyID = v
+	} else if v := query.Get("sse-kms-key-id"); v != "" {
+		client.SSEKMSKeyID = v
+	}
+
 	return client, nil
 }
 
@@ -237,6 +283,11 @@ func (c *ReplicaClient) Init(ctx context.Context) (err error) {
 	// Validate required configuration
 	if c.Bucket == "" {
 		return fmt.Errorf("s3: bucket name is required")
+	}
+
+	// Validate SSE configuration
+	if err := c.validateSSEConfig(); err != nil {
+		return err
 	}
 
 	// Look up region if not specified and no endpoint is used.
@@ -302,6 +353,14 @@ func (c *ReplicaClient) Init(ctx context.Context) (err error) {
 		))
 	}
 
+	// Enable AWS SDK debug logging if LITESTREAM_S3_DEBUG is set.
+	// Useful for debugging S3-compatible providers (signing issues, request/response bodies).
+	// Supports comma-separated values: signing,request,retries
+	// Values: signing, request, request-with-body, response, response-with-body, retries, all
+	if logMode := parseS3DebugEnv(); logMode != 0 {
+		configOpts = append(configOpts, config.WithClientLogMode(logMode))
+	}
+
 	// Load AWS configuration
 	cfg, err := config.LoadDefaultConfig(ctx, configOpts...)
 	if err != nil {
@@ -322,7 +381,7 @@ func (c *ReplicaClient) Init(ctx context.Context) (err error) {
 	// support aws-chunked content encoding used by default checksum calculation
 	// in AWS SDK Go v2 v1.73.0+. Disable automatic checksum calculation for all
 	// custom endpoints.
-	// See: https://github.com/ncruces/litestream/issues/918
+	// See: https://github.com/benbjohnson/litestream/issues/918
 	if c.Endpoint != "" {
 		s3Opts = append(s3Opts, func(o *s3.Options) {
 			o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
@@ -373,6 +432,63 @@ func (c *ReplicaClient) configureEndpoint(opts *[]func(*s3.Options)) {
 	}
 }
 
+// validateSSEConfig validates server-side encryption configuration.
+func (c *ReplicaClient) validateSSEConfig() error {
+	// Check mutual exclusivity: SSE-C and SSE-KMS cannot both be set
+	if c.SSECustomerKey != "" && c.SSEKMSKeyID != "" {
+		return fmt.Errorf("s3: cannot use both sse-customer-key and sse-kms-key-id; they are mutually exclusive")
+	}
+
+	// Validate SSE-C configuration
+	if c.SSECustomerKey != "" {
+		// Algorithm must be AES256 (or default to it)
+		if c.SSECustomerAlgorithm == "" {
+			c.SSECustomerAlgorithm = "AES256"
+		} else if c.SSECustomerAlgorithm != "AES256" {
+			return fmt.Errorf("s3: sse-customer-algorithm must be AES256, got %q", c.SSECustomerAlgorithm)
+		}
+
+		// Validate key is valid base64 and correct length (256 bits = 32 bytes)
+		keyBytes, err := base64.StdEncoding.DecodeString(c.SSECustomerKey)
+		if err != nil {
+			return fmt.Errorf("s3: sse-customer-key must be valid base64: %w", err)
+		}
+		if len(keyBytes) != 32 {
+			return fmt.Errorf("s3: sse-customer-key must be 256-bit (32 bytes) when decoded, got %d bytes", len(keyBytes))
+		}
+
+		// Auto-compute MD5 if not provided
+		if c.SSECustomerKeyMD5 == "" {
+			sum := md5.Sum(keyBytes)
+			c.SSECustomerKeyMD5 = base64.StdEncoding.EncodeToString(sum[:])
+		}
+
+		// SSE-C requires HTTPS (except for localhost/private networks for testing)
+		if c.Endpoint != "" {
+			endpoint := c.Endpoint
+			if !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") {
+				endpoint = "https://" + endpoint
+			}
+			if strings.HasPrefix(endpoint, "http://") {
+				u, err := url.Parse(endpoint)
+				if err == nil {
+					host := u.Hostname()
+					// Allow localhost by name
+					if host == "localhost" {
+						// OK - localhost is allowed
+					} else if ip := net.ParseIP(host); ip != nil && (ip.IsLoopback() || ip.IsPrivate()) {
+						// OK - loopback (127.x.x.x) or private RFC1918 ranges (10.x, 172.16-31.x, 192.168.x)
+					} else {
+						return fmt.Errorf("s3: sse-customer-key requires HTTPS endpoint (HTTP only allowed for localhost/private networks)")
+					}
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
 // findBucketRegion looks up the AWS region for a bucket. Returns blank if non-S3.
 func (c *ReplicaClient) findBucketRegion(ctx context.Context, bucket string) (string, error) {
 	// Build a config with credentials but no region
@@ -419,6 +535,8 @@ func (c *ReplicaClient) findBucketRegion(ctx context.Context, bucket string) (st
 
 // LTXFiles returns an iterator over all LTX files on the replica for the given level.
 // When useMetadata is true, fetches accurate timestamps from S3 metadata via HeadObject.
+// This uses parallel batched requests (controlled by MetadataConcurrency) to avoid hangs
+// with large backup histories (see issue #930).
 // When false, uses fast LastModified timestamps from LIST operation.
 func (c *ReplicaClient) LTXFiles(ctx context.Context, level int, seek ltx.TXID, useMetadata bool) (ltx.FileIterator, error) {
 	if err := c.Init(ctx); err != nil {
@@ -444,11 +562,22 @@ func (c *ReplicaClient) OpenLTXFile(ctx context.Context, level int, minTXID, max
 	// Build the key from the file info
 	filename := ltx.FormatFilename(minTXID, maxTXID)
 	key := c.Path + "/" + fmt.Sprintf("%04x/%s", level, filename)
-	out, err := c.s3.GetObject(ctx, &s3.GetObjectInput{
+
+	input := &s3.GetObjectInput{
 		Bucket: aws.String(c.Bucket),
 		Key:    aws.String(key),
 		Range:  aws.String(rangeStr),
-	})
+	}
+
+	// Add SSE-C parameters if configured (required for reading SSE-C encrypted objects)
+	// Note: SSE-KMS does not require parameters on read - decryption is automatic
+	if c.SSECustomerKey != "" {
+		input.SSECustomerAlgorithm = aws.String(c.SSECustomerAlgorithm)
+		input.SSECustomerKey = aws.String(c.SSECustomerKey)
+		input.SSECustomerKeyMD5 = aws.String(c.SSECustomerKeyMD5)
+	}
+
+	out, err := c.s3.GetObject(ctx, input)
 	if err != nil {
 		if isNotExists(err) {
 			return nil, os.ErrNotExist
@@ -487,12 +616,27 @@ func (c *ReplicaClient) WriteLTXFile(ctx context.Context, level int, minTXID, ma
 		MetadataKeyTimestamp: timestamp.Format(time.RFC3339Nano),
 	}
 
-	out, err := c.uploader.Upload(ctx, &s3.PutObjectInput{
+	input := &s3.PutObjectInput{
 		Bucket:   aws.String(c.Bucket),
 		Key:      aws.String(key),
 		Body:     rc,
 		Metadata: metadata,
-	})
+	}
+
+	// Add SSE-C parameters if configured
+	if c.SSECustomerKey != "" {
+		input.SSECustomerAlgorithm = aws.String(c.SSECustomerAlgorithm)
+		input.SSECustomerKey = aws.String(c.SSECustomerKey)
+		input.SSECustomerKeyMD5 = aws.String(c.SSECustomerKeyMD5)
+	}
+
+	// Add SSE-KMS parameters if configured
+	if c.SSEKMSKeyID != "" {
+		input.ServerSideEncryption = types.ServerSideEncryptionAwsKms
+		input.SSEKMSKeyId = aws.String(c.SSEKMSKeyID)
+	}
+
+	out, err := c.uploader.Upload(ctx, input)
 	if err != nil {
 		return nil, fmt.Errorf("s3: upload to %s: %w", key, err)
 	}
@@ -614,7 +758,7 @@ func (c *ReplicaClient) middlewareOption() func(*middleware.Stack) error {
 		// 2. S3-compatible providers (Filebase, MinIO, Backblaze B2, etc.) that don't
 		//    support aws-chunked encoding at all
 		// See: https://github.com/aws/aws-sdk-go-v2/discussions/2960
-		// See: https://github.com/ncruces/litestream/issues/895
+		// See: https://github.com/benbjohnson/litestream/issues/895
 		if !c.SignPayload || c.Endpoint != "" {
 			stack.Finalize.Remove("addInputChecksumTrailer")
 		}
@@ -881,12 +1025,14 @@ func (c *ReplicaClient) DeleteAll(ctx context.Context) error {
 
 // fileIterator represents an iterator over LTX files in S3.
 type fileIterator struct {
-	ctx         context.Context
-	cancel      context.CancelFunc
-	client      *ReplicaClient
-	level       int
-	seek        ltx.TXID
-	useMetadata bool // When true, fetch accurate timestamps from metadata
+	ctx    context.Context
+	cancel context.CancelFunc
+	client *ReplicaClient
+	level  int
+	seek   ltx.TXID
+
+	useMetadata   bool                 // When true, fetch accurate timestamps from metadata
+	metadataCache map[string]time.Time // key -> timestamp cache for batch fetches
 
 	paginator *s3.ListObjectsV2Paginator
 	page      *s3.ListObjectsV2Output
@@ -901,12 +1047,13 @@ func newFileIterator(ctx context.Context, client *ReplicaClient, level int, seek
 	ctx, cancel := context.WithCancel(ctx)
 
 	itr := &fileIterator{
-		ctx:         ctx,
-		cancel:      cancel,
-		client:      client,
-		level:       level,
-		seek:        seek,
-		useMetadata: useMetadata,
+		ctx:           ctx,
+		cancel:        cancel,
+		client:        client,
+		level:         level,
+		seek:          seek,
+		useMetadata:   useMetadata,
+		metadataCache: make(map[string]time.Time),
 	}
 
 	// Create paginator for listing objects with level prefix
@@ -917,6 +1064,79 @@ func newFileIterator(ctx context.Context, client *ReplicaClient, level int, seek
 	})
 
 	return itr
+}
+
+// fetchMetadataBatch fetches timestamps from S3 metadata for a batch of keys in parallel.
+func (itr *fileIterator) fetchMetadataBatch(keys []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+
+	// Determine concurrency limit
+	concurrency := itr.client.MetadataConcurrency
+	if concurrency <= 0 {
+		concurrency = DefaultMetadataConcurrency
+	}
+
+	// Pre-allocate results map to avoid lock contention during writes
+	results := make(map[string]time.Time, len(keys))
+	var mu sync.Mutex
+
+	// Use x/sync/semaphore for precise concurrency control with context support
+	sem := semaphore.NewWeighted(int64(concurrency))
+	g, ctx := errgroup.WithContext(itr.ctx)
+
+	for _, key := range keys {
+		key := key // capture for goroutine
+
+		g.Go(func() error {
+			// Acquire semaphore slot (blocking with context cancellation)
+			if err := sem.Acquire(ctx, 1); err != nil {
+				return err // context cancelled
+			}
+			defer sem.Release(1)
+
+			headInput := &s3.HeadObjectInput{
+				Bucket: aws.String(itr.client.Bucket),
+				Key:    aws.String(key),
+			}
+
+			// Add SSE-C parameters if configured (required for reading SSE-C encrypted objects)
+			// Note: SSE-KMS does not require parameters on HeadObject - access is automatic
+			if itr.client.SSECustomerKey != "" {
+				headInput.SSECustomerAlgorithm = aws.String(itr.client.SSECustomerAlgorithm)
+				headInput.SSECustomerKey = aws.String(itr.client.SSECustomerKey)
+				headInput.SSECustomerKeyMD5 = aws.String(itr.client.SSECustomerKeyMD5)
+			}
+
+			head, err := itr.client.s3.HeadObject(ctx, headInput)
+			if err != nil {
+				// Non-fatal: file might not have metadata, use LastModified
+				return nil
+			}
+
+			if head.Metadata != nil {
+				if ts, ok := head.Metadata[MetadataKeyTimestamp]; ok {
+					if parsed, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+						mu.Lock()
+						results[key] = parsed
+						mu.Unlock()
+					}
+				}
+			}
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return err
+	}
+
+	// Merge results into cache
+	for k, v := range results {
+		itr.metadataCache[k] = v
+	}
+	return nil
 }
 
 // Close stops iteration.
@@ -947,6 +1167,20 @@ func (itr *fileIterator) Next() bool {
 				return false
 			}
 			itr.pageIndex = 0
+
+			// Batch fetch metadata for the entire page when useMetadata is true.
+			// This uses parallel HeadObject calls controlled by MetadataConcurrency
+			// to avoid the O(N) sequential calls that caused restore hangs (issue #930).
+			if itr.useMetadata && len(itr.page.Contents) > 0 {
+				keys := make([]string, 0, len(itr.page.Contents))
+				for _, obj := range itr.page.Contents {
+					keys = append(keys, aws.ToString(obj.Key))
+				}
+				if err := itr.fetchMetadataBatch(keys); err != nil {
+					itr.err = err
+					return false
+				}
+			}
 		}
 
 		// Process current object
@@ -955,7 +1189,8 @@ func (itr *fileIterator) Next() bool {
 			itr.pageIndex++
 
 			// Extract file info from key
-			key := path.Base(aws.ToString(obj.Key))
+			fullKey := aws.ToString(obj.Key)
+			key := path.Base(fullKey)
 			minTXID, maxTXID, err := ltx.ParseFilename(key)
 			if err != nil {
 				continue // Skip non-LTX files
@@ -981,33 +1216,18 @@ func (itr *fileIterator) Next() bool {
 			// Set file info
 			info.Size = aws.ToInt64(obj.Size)
 
-			// Use fast LastModified timestamp by default
-			createdAt := aws.ToTime(obj.LastModified).UTC()
-
-			// Only fetch accurate timestamp from metadata when requested (timestamp-based restore)
+			// Use cached metadata timestamp if available (from batch fetch),
+			// otherwise fallback to LastModified from LIST operation.
 			if itr.useMetadata {
-				head, err := itr.client.s3.HeadObject(itr.ctx, &s3.HeadObjectInput{
-					Bucket: aws.String(itr.client.Bucket),
-					Key:    obj.Key,
-				})
-				if err != nil {
-					itr.err = fmt.Errorf("fetch object metadata: %w", err)
-					return false
+				if ts, ok := itr.metadataCache[fullKey]; ok {
+					info.CreatedAt = ts
+				} else {
+					info.CreatedAt = aws.ToTime(obj.LastModified).UTC()
 				}
-
-				if head.Metadata != nil {
-					if ts, ok := head.Metadata[MetadataKeyTimestamp]; ok {
-						if parsed, err := time.Parse(time.RFC3339Nano, ts); err == nil {
-							createdAt = parsed
-						} else {
-							itr.err = fmt.Errorf("parse timestamp from metadata: %w", err)
-							return false
-						}
-					}
-				}
+			} else {
+				info.CreatedAt = aws.ToTime(obj.LastModified).UTC()
 			}
 
-			info.CreatedAt = createdAt
 			itr.info = info
 			return true
 		}
@@ -1135,4 +1355,37 @@ func deleteOutputError(out *s3.DeleteObjectsOutput) error {
 		fmt.Fprintf(&b, "\n%s: %s", aws.ToString(err.Key), aws.ToString(err.Message))
 	}
 	return errors.New(b.String())
+}
+
+// parseS3DebugEnv parses the LITESTREAM_S3_DEBUG environment variable and returns
+// the corresponding AWS SDK ClientLogMode. Supports comma-separated values.
+func parseS3DebugEnv() aws.ClientLogMode {
+	v := os.Getenv("LITESTREAM_S3_DEBUG")
+	if v == "" {
+		return 0
+	}
+
+	var logMode aws.ClientLogMode
+	for _, mode := range strings.Split(v, ",") {
+		switch strings.ToLower(strings.TrimSpace(mode)) {
+		case "signing":
+			logMode |= aws.LogSigning
+		case "request":
+			logMode |= aws.LogRequest
+		case "request-with-body":
+			logMode |= aws.LogRequestWithBody
+		case "response":
+			logMode |= aws.LogResponse
+		case "response-with-body":
+			logMode |= aws.LogResponseWithBody
+		case "retries":
+			logMode |= aws.LogRetries
+		case "all":
+			logMode |= aws.LogSigning | aws.LogRequest | aws.LogRequestWithBody |
+				aws.LogResponse | aws.LogResponseWithBody | aws.LogRetries
+		default:
+			slog.Warn("unknown LITESTREAM_S3_DEBUG value, expected: signing, request, request-with-body, response, response-with-body, retries, all", "value", mode)
+		}
+	}
+	return logMode
 }
