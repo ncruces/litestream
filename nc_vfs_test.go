@@ -11,7 +11,7 @@ import (
 	"github.com/ncruces/litestream/file"
 )
 
-func TestNewVFS(t *testing.T) {
+func TestCreateVFSReadReplica(t *testing.T) {
 	dir := t.TempDir()
 	dbpath := filepath.Join(dir, "test.db")
 	backup := filepath.Join(dir, "backup", "test.db")
@@ -25,7 +25,7 @@ func TestNewVFS(t *testing.T) {
 	client := file.NewReplicaClient(backup)
 	setupVFSReplication(t, dbpath, client)
 
-	litestream.NewVFS("test.db", client, litestream.VFSOptions{})
+	litestream.CreateVFSReadReplica("test.db", client, litestream.VFSOptions{})
 	replica, err := driver.Open("file:test.db?vfs=litestream")
 	if err != nil {
 		t.Fatal(err)

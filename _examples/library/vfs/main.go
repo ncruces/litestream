@@ -41,8 +41,8 @@ func main() {
 	client.AccessKeyID = os.Getenv("AWS_ACCESS_KEY_ID")
 	client.SecretAccessKey = os.Getenv("AWS_SECRET_ACCESS_KEY")
 
-	// 2. Create VFS replica client
-	litestream.NewVFS(path, client, litestream.VFSOptions{
+	// 2. Create VFS read-replica VFS
+	litestream.CreateVFSReadReplica(path, client, litestream.VFSOptions{
 		PollInterval: 5 * time.Second,
 	})
 

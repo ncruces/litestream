@@ -1,4 +1,3 @@
-// Package litestream implements a Litestream lightweight read-replica VFS.
 package litestream
 
 import (
@@ -27,7 +26,7 @@ var (
 	liteDBs = map[string]*liteDB{}
 )
 
-// VFSOptions represents options for [NewVFS].
+// VFSOptions represents options for [CreateVFSReadReplica].
 type VFSOptions struct {
 	// Where to log error messages. May be nil.
 	Logger *slog.Logger
@@ -42,8 +41,8 @@ type VFSOptions struct {
 	CacheSize int
 }
 
-// NewVFS creates a read-replica VFS for a Litestream client.
-func NewVFS(name string, client ReplicaClient, options VFSOptions) {
+// CreateVFSReadReplica creates a read-replica VFS from a client.
+func CreateVFSReadReplica(name string, client ReplicaClient, options VFSOptions) {
 	if options.Logger != nil {
 		options.Logger = options.Logger.With("name", name)
 	} else {
@@ -65,8 +64,8 @@ func NewVFS(name string, client ReplicaClient, options VFSOptions) {
 	liteMtx.Unlock()
 }
 
-// RemoveVFS removes a Litestream read-replica VFS by name.
-func RemoveVFS(name string) {
+// RemoveVFSReadReplica removes a Litestream read-replica VFS by name.
+func RemoveVFSReadReplica(name string) {
 	liteMtx.Lock()
 	delete(liteDBs, name)
 	liteMtx.Unlock()
